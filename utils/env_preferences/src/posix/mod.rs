@@ -2,9 +2,11 @@
 // called LICENSE at the top level of the ICU4X source tree
 // (online at: https://github.com/unicode-org/icu4x/blob/main/LICENSE ).
 
+#[cfg(test)]
+mod tests;
+
 mod aliases;
 pub mod fetch;
 mod parse;
 
-#[cfg(test)]
-mod tests;
+pub use parse::{PosixLocale, PosixParseError};

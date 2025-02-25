@@ -6,12 +6,12 @@ use displaydoc::Display;
 use icu_locale::extensions::unicode::{key, value};
 use icu_locale::extensions::Extensions;
 use icu_locale::subtags::{language, script, variant, Language, Region, Variants};
-use icu_locale::{LanguageIdentifier, Locale};
+use icu_locale::{LanguageIdentifier, Locale, ParseError};
 
 use super::aliases::get_bcp47_subtags_from_posix_alias;
 
 #[derive(Display, Debug, PartialEq)]
-pub enum ParseError {
+pub enum PosixParseError {
     #[displaydoc("Empty locale")]
     EmptyLocale,
     #[displaydoc("Empty section beginning at offset {offset}")]
@@ -32,20 +32,6 @@ pub enum ParseError {
     },
 }
 
-#[derive(Display, Debug, PartialEq)]
-pub enum ConversionError {
-    #[displaydoc("Invalid language")]
-    InvalidLanguage {
-        start_offset: usize,
-        end_offset: usize,
-    },
-    #[displaydoc("Invalid region")]
-    InvalidRegion {
-        start_offset: usize,
-        end_offset: usize,
-    },
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 enum Delimiter {
     Territory,
@@ -55,7 +41,7 @@ enum Delimiter {
 
 impl Delimiter {
     /// Find any optional sections, returning an error if the delimiters are invalid
-    pub fn try_find_sections(src: &str) -> Result<Vec<(usize, Self)>, ParseError> {
+    pub fn try_find_sections(src: &str) -> Result<Vec<(usize, Self)>, PosixParseError> {
         // Find the offset and delimiter of each optional section
         let optional_sections = src
             .chars()
@@ -77,7 +63,7 @@ impl Delimiter {
                 .skip(index + 1)
                 .find(|(_second_offset, second_delimiter)| first_delimiter == second_delimiter)
             {
-                return Err(ParseError::RepeatedDelimiter {
+                return Err(PosixParseError::RepeatedDelimiter {
                     first_offset: *first_offset,
                     second_offset: *second_offset,
                 });
@@ -87,7 +73,7 @@ impl Delimiter {
             // For example "en.utf8_US" is invalid because codeset appears before territory
             if let Some((second_offset, second_delimiter)) = optional_sections.get(index + 1) {
                 if first_delimiter > second_delimiter {
-                    return Err(ParseError::UnorderedDelimiter {
+                    return Err(PosixParseError::UnorderedDelimiter {
                         first_offset: *first_offset,
                         second_offset: *second_offset,
                     });
@@ -117,19 +103,19 @@ impl<'src> PosixLocale<'src> {
     ///
     /// See section 8.2 of the POSIX spec for more details:
     /// <https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html#tag_08_02>
-    pub fn try_from_str(src: &'src str) -> Result<Self, ParseError> {
+    pub fn try_from_str(src: &'src str) -> Result<Self, PosixParseError> {
         // These cases are implementation-defined and can be ignored:
         // - Empty locales
         if src.is_empty() {
-            return Err(ParseError::EmptyLocale);
+            return Err(PosixParseError::EmptyLocale);
         }
         // - Any locale containing '/'
         if let Some(offset) = src.find('/') {
-            return Err(ParseError::InvalidCharacter { offset });
+            return Err(PosixParseError::InvalidCharacter { offset });
         }
         // - Locales consisting of "." or ".."
         if src == "." || src == ".." {
-            return Err(ParseError::InvalidLocale);
+            return Err(PosixParseError::InvalidLocale);
         }
 
         // Find any optional sections, and return any delimiter-related errors
@@ -143,7 +129,7 @@ impl<'src> PosixLocale<'src> {
 
         // Make sure the language itself is non-empty
         if language.is_empty() {
-            return Err(ParseError::EmptySection { offset: 0 });
+            return Err(PosixParseError::EmptySection { offset: 0 });
         }
 
         let mut locale = Self {
@@ -162,7 +148,7 @@ impl<'src> PosixLocale<'src> {
 
             // Make sure this section is non-empty (more characters than just the delimiter)
             if start_offset + 1 >= end_offset {
-                return Err(ParseError::EmptySection {
+                return Err(PosixParseError::EmptySection {
                     offset: *start_offset,
                 });
             }
@@ -185,33 +171,16 @@ impl<'src> PosixLocale<'src> {
     /// POSIX locales that will return an error or silently ignore data.
     /// In particular, the codeset section is always ignored, and only some common modifiers are handled
     /// (unknown modifiers will be silently ignored).
-    pub fn try_convert_lossy(&self) -> Result<Locale, ConversionError> {
+    pub fn try_convert_lossy(&self) -> Result<Locale, ParseError> {
         // Check if the language matches a known alias
         let mut language = get_bcp47_subtags_from_posix_alias(self.language)
-            .map(|(language, _region)| language)
-            .or(Language::try_from_str(self.language).ok())
-            .ok_or(ConversionError::InvalidLanguage {
-                start_offset: 0,
-                end_offset: self.language.len(),
-            })?;
+            .map(|(language, _region)| Ok(language))
+            .unwrap_or(Language::try_from_str(self.language))?;
 
         // Use the associated region if the language matches a known alias
         let region = get_bcp47_subtags_from_posix_alias(self.language)
             .map(|(_language, region)| Ok(region))
-            .unwrap_or(
-                self.territory
-                    .map(|territory| {
-                        Region::try_from_str(territory).map_err(|_err| {
-                            ConversionError::InvalidRegion {
-                                // Add 1 to skip the delimiter
-                                start_offset: self.language.len() + 1,
-                                // Add 1 to include the final character
-                                end_offset: self.language.len() + territory.len() + 1,
-                            }
-                        })
-                    })
-                    .transpose(),
-            )?;
+            .unwrap_or(self.territory.map(Region::try_from_str).transpose())?;
 
         let mut extensions = Extensions::new();
         let mut script = None;
